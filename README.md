@@ -101,6 +101,8 @@ Windows PowerShell에서는 `Copy-Item .env.example .env`와 `python travel_plan
 
 **현재 캐싱은 구현하지 않았습니다.** 적용한다면 `main`에서 날짜 파싱과 키 설정을 마친 직후, 첫 LLM 호출 전에 `results/YYYY-MM-DD_raw.json`과 `results/YYYY-MM-DD_travel_plan.md`의 존재 여부를 확인합니다. 캐시 키는 날짜·LLM 모델·LLM 제공자·지도 제공자로 구성하고, 원본 JSON에 이 실행 설정을 기록해 현재 설정과 일치할 때만 재사용합니다. 두 파일이 모두 있고 JSON 스키마가 유효하며 오류가 없는 결과만 적중으로 간주합니다. 생성 후 **24시간**이 지나면 만료시키고, `--refresh` 옵션을 추가해 강제 재생성을 허용하는 방식입니다. 날씨·행사·식당 정보의 변경 가능성 때문에 무기한 재사용하지 않습니다.
 
+예외 처리 예시: 파일 하나가 없거나 JSON이 손상됐거나 수정 시각이 미래로 기록됐으면 캐시를 무효로 보고 새로 생성합니다. 파일 읽기 권한이 없을 때는 오류 경로를 알려 주고 종료해 권한 문제를 사용자가 고칠 수 있게 합니다. 이 동작도 캐시를 구현할 때 함께 추가할 설계입니다.
+
 ## 오류 처리
 
 | 상황 | 동작 |
@@ -111,6 +113,8 @@ Windows PowerShell에서는 `Copy-Item .env.example .env`와 `python travel_plan
 | 최종 리포트 API 실패 / 섹션 누락 | 오류를 기록하고 필수 섹션을 갖춘 기본 Markdown 저장 |
 
 HTTP 401/403은 인증, 429는 쿼터, 연결 실패는 네트워크 오류로 분류합니다. 오류 목록은 원본 JSON의 `errors`와 리포트의 **오류 요약**에서 확인할 수 있습니다. 키나 API 오류 응답 원문은 저장하지 않습니다.
+
+운영 중 HTTP 401/403이 나오면 키 종류와 Kakao Developers의 앱·카카오맵 사용 설정을 확인하세요. 결과 저장 시 `PermissionError`가 발생하면 `results/`의 쓰기 권한과 파일 소유자를 확인한 뒤 다시 실행하세요(예: macOS/Linux의 `ls -ld results`).
 
 ## 검증
 
