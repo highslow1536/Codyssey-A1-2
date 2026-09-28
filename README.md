@@ -12,7 +12,8 @@
 | --- | --- |
 | `argparse` CLI, 필수 `-date`, 날짜 검증 | [`travel_planner.py`](travel_planner.py)의 `main`, `parse_date` |
 | LLM의 날씨·행사·추천 이유를 JSON으로 구조화 | `recommend`, `validate_recommendation`; 실제 값은 [원본 JSON](results/2026-10-15_raw.json)의 `recommendation` |
-| 추천 지역으로 국내 맛집 검색 | `search_restaurants`; 실제 Kakao 검색 결과 5곳은 원본 JSON의 `restaurants` |
+| 추천 지역으로 국내 맛집 검색 | `PlaceSearcher` 인터페이스와 `KakaoPlaceSearcher`; 실제 Kakao 검색 결과 5곳은 원본 JSON의 `restaurants` |
+| 지도 API 교체와 검색어 보정 | `PlaceSearcher` 구현 교체, `normalize_city_for_search`로 괄호·부연 설명 제거 및 지역 토큰 선택 |
 | LLM으로 최종 Markdown 리포트 생성 | `generate_report`; [실제 리포트](results/2026-10-15_travel_plan.md)에 필수 7개 섹션 포함 |
 | 장소 검색 실패·0건, JSON 파싱 실패 등 처리 | `errors` 기록, 맛집 `데이터 없음` 처리, 추천 JSON 재요청 1회 |
 | 결과 저장 | `results/YYYY-MM-DD_raw.json`, `results/YYYY-MM-DD_travel_plan.md` |
@@ -78,17 +79,27 @@ Windows PowerShell에서는 `Copy-Item .env.example .env`와 `python travel_plan
 | [`results/2026-10-15_raw.json`](results/2026-10-15_raw.json) | 날짜, `recommendation`(지역·날씨·행사·이유), `restaurants`(이름·주소·분류·URL·좌표), `errors` 배열 |
 | [`results/2026-10-15_travel_plan.md`](results/2026-10-15_travel_plan.md) | 추천 지역·이유, 날씨, 행사/축제, 맛집, 오전/오후/저녁 일정, 오류 요약 |
 
-다른 날짜를 입력하면 같은 형식으로 `results/YYYY-MM-DD_raw.json`과 `results/YYYY-MM-DD_travel_plan.md`를 생성합니다. 같은 날짜로 재실행하면 해당 파일을 갱신합니다. 위 두 파일은 **실제 API 실행 결과**이며 제출물에 포함돼 있습니다.
+다른 날짜를 입력하면 같은 형식으로 `results/YYYY-MM-DD_raw.json`과 `results/YYYY-MM-DD_travel_plan.md`를 생성합니다. 현재는 같은 날짜로 재실행하면 API를 다시 호출하고 해당 파일을 갱신합니다. 위 두 파일은 **실제 API 실행 결과**이며 제출물에 포함돼 있습니다.
 
 날씨는 일반적인 계절 정보이고 실시간 예보가 아닙니다. 행사/축제는 후보이므로 개최 여부와 식당 영업 정보는 방문 전에 확인해야 합니다. 미션은 정보의 실시간 정확도보다 API 데이터의 구조화와 연결을 평가합니다.
 
 ## API 요청과 데이터 연결
 
 1. **LLM 추천:** `POST /v1/chat/completions` 요청에 `model`·`messages`를 JSON 본문으로, API 키를 Bearer 헤더로 전달합니다. `choices[0].message.content`를 JSON으로 파싱해 `recommended_city`, `weather`, `events`, `reason`을 검증합니다. 제공자가 `events`를 문자열 하나로 반환하면 길이 1의 배열로 정규화합니다.
-2. **Kakao 맛집 검색:** 추천 JSON의 `recommended_city`를 `"도시명 맛집"` 검색어로 연결합니다. Kakao Local 키워드 검색 API에 `GET` 요청을 보내고, 응답의 상위 5곳을 이름·주소·분류·URL·경위도로 정리합니다.
+2. **Kakao 맛집 검색:** 추천 JSON의 `recommended_city`를 정규화한 뒤 `"지역명 맛집"` 검색어로 연결합니다. Kakao Local 키워드 검색 API에 `GET` 요청을 보내고, 응답의 상위 5곳을 이름·주소·분류·URL·경위도로 정리합니다.
 3. **최종 리포트:** 추천 JSON과 맛집 목록(0건 가능)을 LLM에 다시 전달해 Markdown을 작성합니다. 필수 섹션을 검사하고 오류 요약을 덧붙입니다.
 
 `POST`는 생성에 필요한 데이터를 요청 본문에 담고, `GET`은 조회 조건을 URL 쿼리로 전달합니다. 이 프로그램은 두 방식의 응답을 다음 API 입력으로 연결합니다.
+
+### 지도 API 교체 지점과 도시명 검색어
+
+`PlaceSearcher.search_restaurants(city) -> list[dict]`가 지도 API 인터페이스입니다. 현재 `KakaoPlaceSearcher`가 Kakao 호출·응답 변환을 맡고, `main`은 `PlaceSearcher`만 사용합니다. 다른 지도 API를 쓰려면 같은 메서드를 구현하는 클래스를 만들고 **`make_place_searcher` 한 곳**에서 해당 제공자의 키를 확인해 새 구현을 반환하면 됩니다. 반환 항목은 `name`, `address`, `category`, `url`, `lng`, `lat`의 공통 형식을 유지해야 리포트 코드 수정 없이 교체됩니다. 새 제공자의 인증 방식은 해당 구현에 둡니다.
+
+검색 직전 `normalize_city_for_search`가 괄호 속 설명을 제거하고 쉼표·슬래시 등 뒤의 부연 문구를 제외합니다. 그다음 지역 토큰을 골라 `강원도 강릉시 (경포 일대)`는 `강원도 강릉시 맛집`, `경주(경상북도), 가을 여행`은 `경주 맛집`으로 검색합니다. 추천 JSON의 원래 지역명은 보존하고 검색어에만 보정값을 사용합니다. 모호한 지명까지 완전히 해소하는 지오코딩은 적용하지 않았습니다.
+
+### 같은 날짜 결과 캐싱 설계
+
+**현재 캐싱은 구현하지 않았습니다.** 적용한다면 `main`에서 날짜 파싱과 키 설정을 마친 직후, 첫 LLM 호출 전에 `results/YYYY-MM-DD_raw.json`과 `results/YYYY-MM-DD_travel_plan.md`의 존재 여부를 확인합니다. 캐시 키는 날짜·LLM 모델·LLM 제공자·지도 제공자로 구성하고, 원본 JSON에 이 실행 설정을 기록해 현재 설정과 일치할 때만 재사용합니다. 두 파일이 모두 있고 JSON 스키마가 유효하며 오류가 없는 결과만 적중으로 간주합니다. 생성 후 **24시간**이 지나면 만료시키고, `--refresh` 옵션을 추가해 강제 재생성을 허용하는 방식입니다. 날씨·행사·식당 정보의 변경 가능성 때문에 무기한 재사용하지 않습니다.
 
 ## 오류 처리
 
@@ -107,6 +118,6 @@ HTTP 401/403은 인증, 429는 쿼터, 연결 실패는 네트워크 오류로 �
 python3 -m unittest -v test_travel_planner.py
 ```
 
-자동 테스트 **6개 통과**: 추천 JSON 재요청과 정규화, `.env` 우선순위, 정상 저장, Kakao 인증 실패 시 리포트 계속 생성 등을 확인했습니다. 실제 API로 `2026-10-15`를 실행해 경주·맛집 5곳·오류 0건을 확인했고, 저장된 결과 파일에 API 키가 없는 것도 검사했습니다.
+자동 테스트 **9개**는 추천 JSON 재요청, `.env` 우선순위, 정상 저장, Kakao 인증 실패 시 리포트 계속 생성, 실제 요청 검색어 정규화, 지도 검색 구현 교체 등을 확인합니다. 기존 `2026-10-15` 파일은 실제 API로 실행해 경주·맛집 5곳·오류 0건을 확인한 결과이며, 저장된 결과 파일에 API 키가 없는 것도 검사했습니다.
 
 API 사양: [OpenAI Chat Completions](https://developers.openai.com/api/reference/cli/resources/chat), [Kakao Local 키워드 검색](https://developers.kakao.com/docs/ko/local/dev-guide).

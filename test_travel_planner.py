@@ -22,6 +22,35 @@ def response(text):
 
 
 class TravelPlannerTests(unittest.TestCase):
+    def test_city_search_keyword_normalization(self):
+        self.assertEqual(app.normalize_city_for_search("강원도 강릉시 (경포 일대)"), "강원도 강릉시")
+        self.assertEqual(app.normalize_city_for_search("경주(경상북도), 가을 여행"), "경주")
+        self.assertEqual(app.normalize_city_for_search("서울특별시 종로구 / 도보 여행"), "서울특별시 종로구")
+
+    def test_kakao_request_uses_normalized_city(self):
+        with patch.object(app, "call_json", return_value={"documents": []}) as api:
+            self.assertEqual(app.KakaoPlaceSearcher("dummy").search_restaurants("강원도 강릉시 (경포 일대)"), [])
+        self.assertEqual(parse_qs(urlsplit(api.call_args.args[0]).query)["query"], ["강원도 강릉시 맛집"])
+
+    def test_place_searcher_can_be_replaced_without_changing_report_flow(self):
+        class AlternatePlaceSearcher:
+            def search_restaurants(self, city):
+                self.city = city
+                return [{"name": "대체 장소", "address": "가상 주소", "category": "음식점",
+                         "url": "", "lng": None, "lat": None}]
+
+        searcher = AlternatePlaceSearcher()
+        with patch.object(app, "make_place_searcher", return_value=searcher), \
+                patch.object(app, "recommend", return_value=RECOMMENDATION), \
+                patch.object(app, "generate_report", return_value="대체 장소가 포함된 리포트"), \
+                patch.dict(os.environ, {"LLM_API_KEY": "dummy-llm", "KAKAO_REST_API_KEY": "dummy-kakao"}):
+            with tempfile.TemporaryDirectory() as tmp, patch.object(app, "RESULTS_DIR", Path(tmp)):
+                self.assertEqual(app.main(["-date", "2026-10-15"]), 0)
+                raw = json.loads((Path(tmp) / "2026-10-15_raw.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(searcher.city, "강릉")
+        self.assertEqual(raw["restaurants"][0]["name"], "대체 장소")
+
     def test_recommendation_retries_invalid_json_once(self):
         with patch.object(app, "llm_text", side_effect=["잘못된 JSON", json.dumps(RECOMMENDATION)]) as model:
             self.assertEqual(app.recommend("dummy", "2026-10-15"), RECOMMENDATION)

@@ -7,7 +7,9 @@ from datetime import date
 import json
 import os
 from pathlib import Path
+import re
 import sys
+from typing import Protocol
 from urllib import error, parse, request
 
 
@@ -135,31 +137,64 @@ def recommend(api_key: str, travel_date: str) -> dict:
     raise AssertionError("도달할 수 없음")
 
 
-def search_restaurants(api_key: str, city: str) -> list[dict]:
-    query = parse.urlencode({"query": f"{city} 맛집", "size": 5, "category_group_code": "FD6"})
-    result = call_json(
-        f"{KAKAO_URL}?{query}", method="GET",
-        headers={"Authorization": f"KakaoAK {api_key}"},
-    )
-    documents = result.get("documents")
-    if not isinstance(documents, list):
-        raise APIError("PARSE_ERROR", "장소 검색 응답에 documents 목록이 없습니다")
-    places = []
-    for item in documents:
-        if not isinstance(item, dict) or not item.get("place_name"):
-            continue
-        try:
-            lng, lat = float(item["x"]), float(item["y"])
-        except (KeyError, TypeError, ValueError):
-            lng = lat = None
-        places.append({
-            "name": str(item["place_name"]),
-            "address": str(item.get("road_address_name") or item.get("address_name") or "주소 정보 없음"),
-            "category": str(item.get("category_name") or ""),
-            "url": str(item.get("place_url") or ""),
-            "lng": lng, "lat": lat,
-        })
-    return places
+def normalize_city_for_search(city: str) -> str:
+    """LLM의 설명을 덜어내고 검색에 쓸 행정구역 지명을 고른다."""
+    clean = re.sub(r"\([^)]*\)|（[^）]*）", " ", city)
+    clean = re.split(r"[,，/·:：\n]", clean, maxsplit=1)[0]
+    tokens = re.findall(r"[가-힣A-Za-z0-9]+", clean)
+    regions = [token for token in tokens if token.endswith(("시", "군", "구", "도"))]
+    if len(regions) >= 2 and regions[0].endswith(("시", "도")):
+        return " ".join(regions[:2])
+    if regions:
+        return regions[0]
+    if tokens:
+        return tokens[0]
+    raise APIError("PARSE_ERROR", "검색할 지역명이 비어 있습니다")
+
+
+class PlaceSearcher(Protocol):
+    """지도 제공자별 구현이 반환해야 하는 공통 장소 형식."""
+
+    def search_restaurants(self, city: str) -> list[dict]: ...
+
+
+class KakaoPlaceSearcher:
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    def search_restaurants(self, city: str) -> list[dict]:
+        query = parse.urlencode({"query": f"{normalize_city_for_search(city)} 맛집", "size": 5, "category_group_code": "FD6"})
+        result = call_json(
+            f"{KAKAO_URL}?{query}", method="GET",
+            headers={"Authorization": f"KakaoAK {self.api_key}"},
+        )
+        documents = result.get("documents")
+        if not isinstance(documents, list):
+            raise APIError("PARSE_ERROR", "장소 검색 응답에 documents 목록이 없습니다")
+        places = []
+        for item in documents:
+            if not isinstance(item, dict) or not item.get("place_name"):
+                continue
+            try:
+                lng, lat = float(item["x"]), float(item["y"])
+            except (KeyError, TypeError, ValueError):
+                lng = lat = None
+            places.append({
+                "name": str(item["place_name"]),
+                "address": str(item.get("road_address_name") or item.get("address_name") or "주소 정보 없음"),
+                "category": str(item.get("category_name") or ""),
+                "url": str(item.get("place_url") or ""),
+                "lng": lng, "lat": lat,
+            })
+        return places
+
+
+def make_place_searcher() -> PlaceSearcher:
+    """지도 제공자를 선택하고 해당 제공자의 인증값을 확인한다."""
+    kakao_key = os.environ.get("KAKAO_REST_API_KEY", "").strip()
+    if not kakao_key:
+        raise APIError("CONFIG_ERROR", "API 키 미설정: KAKAO_REST_API_KEY. README의 환경변수 설정 방법을 확인하세요.")
+    return KakaoPlaceSearcher(kakao_key)
 
 
 def fallback_report(travel_date: str, recommendation: dict, restaurants: list[dict], errors: list[dict]) -> str:
@@ -211,10 +246,12 @@ def main(argv: list[str] | None = None) -> int:
 
     load_dotenv()
     llm_key = os.environ.get("LLM_API_KEY", "").strip()
-    kakao_key = os.environ.get("KAKAO_REST_API_KEY", "").strip()
-    if not llm_key or not kakao_key:
-        missing = ", ".join(name for name, value in (("LLM_API_KEY", llm_key), ("KAKAO_REST_API_KEY", kakao_key)) if not value)
-        parser.exit(2, f"API 키 미설정: {missing}. README의 환경변수 설정 방법을 확인하세요.\n")
+    if not llm_key:
+        parser.exit(2, "API 키 미설정: LLM_API_KEY. README의 환경변수 설정 방법을 확인하세요.\n")
+    try:
+        place_searcher = make_place_searcher()
+    except APIError as exc:
+        parser.exit(2, f"{exc}\n")
 
     errors: list[dict] = []
     print("[1/3] 여행지 추천 생성 중 (LLM)...")
@@ -225,9 +262,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"  추천 지역: {recommendation['recommended_city']}")
 
-    print("[2/3] 맛집 검색 중 (Kakao Local)...")
+    print("[2/3] 맛집 검색 중...")
     try:
-        restaurants = search_restaurants(kakao_key, recommendation["recommended_city"])
+        restaurants = place_searcher.search_restaurants(recommendation["recommended_city"])
         if not restaurants:
             errors.append({"step": "place_search", "type": "EMPTY_RESULT", "message": "검색 결과 0건"})
     except APIError as exc:
